@@ -117,6 +117,10 @@ send n address:
 descriptors private:
     bitcoin-cli -datadir={{datadir}} -chain={{chain}} -rpcwallet={{wallet}} listdescriptors {{private}}
 
+# sign a PSBT with the wallet
+[group('rpc')]
+sign psbt:
+    bitcoin-cli -datadir={{datadir}} -chain={{chain}} -rpcwallet={{wallet}} walletprocesspsbt '{{psbt}}' true "ALL|ANYONECANPAY"
 # run any bitcoin-cli rpc command
 [group('rpc')]
 rpc *command:
