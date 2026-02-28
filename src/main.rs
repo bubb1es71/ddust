@@ -10,6 +10,7 @@ use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client, RpcApi};
 use bdk_redb::redb::{Database, TableHandle};
 use bdk_wallet::KeychainKind::Internal;
 use bdk_wallet::bitcoin::absolute::LockTime;
+use bdk_wallet::bitcoin::psbt::Input;
 use bdk_wallet::bitcoin::psbt::PsbtParseError;
 use bdk_wallet::bitcoin::script::PushBytesBuf;
 use bdk_wallet::chain::{CanonicalizationParams, CheckPoint};
@@ -113,26 +114,105 @@ fn main() {
                         })
                         .collect::<Vec<_>>();
                     if !dust.is_empty() {
-                        let input_amount: Amount = dust.iter().map(|out| out.txout.value).sum();
+                        let mut input_amount: Amount = dust.iter().map(|out| out.txout.value).sum();
                         debug!("fees: {}", &input_amount);
                         let utxos = dust.iter().map(|out| out.outpoint).collect::<Vec<_>>();
                         debug!("utxos: {:?}", &utxos);
+
+                        // check trxs from mempool matching the privacy:
+                        // has a single op_return
+                        // one or more inputs with SIGHASH_ALL|ANYONECANPAY signature type
+                        // op_return: can be empty or contains the string "ash"(to ensure trx
+                        // size above the min relayable size of 65 bytes)
+                        // yes:
+                        // add the inputs from this tx to the new trx if:
+                        // the new fee rate is at least 1 sat/vb greater than the original transaction
+                        // create a new PSBT
+                        // sign and broadcast
+                        let rpc_client =
+                            Client::new(&url, auth.clone()).expect("failed to create rpc client");
+                        let tx_ids = rpc_client
+                            .get_raw_mempool()
+                            .expect("failed to get mempool transaction IDs");
+
+                        let mut existing_tx: Option<Transaction> = None;
+                        let mut output_data: Vec<u8> = vec![];
+                        for txid in tx_ids {
+                            let tx = rpc_client.get_raw_transaction(&txid, None).unwrap();
+                            let vouts = &tx.output;
+                            if vouts.len() == 1 {
+                                let script_pubkey = &vouts[0].script_pubkey;
+                                let is_op_return = script_pubkey.is_op_return();
+
+                                if is_op_return {
+                                    let script_bytes = script_pubkey.as_bytes();
+                                    // [0x61, 0x73, 0x68]
+                                    let ash_bytes = "ash".as_bytes();
+                                    let is_dust_disposal = script_bytes == [0x6a] // empty
+                                        || script_bytes == [&[0x6a, 0x03], ash_bytes].concat(); // "ash"
+
+                                    if is_dust_disposal {
+                                        output_data = match script_bytes {
+                                            [0x6a] => vec![],                       // empty OP_RETURN no data
+                                            [0x6a, _, rest @ ..] => rest.to_vec(),  // skip 0x6a (OP_RETURN) and push byte
+                                            _ => vec![],
+                                        };
+                                        existing_tx = Some(tx);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
                         let mut tx_builder = wallet.build_tx();
+
                         tx_builder
                             .nlocktime(LockTime::from_height(0).expect("valid height"))
-                            .fee_absolute(input_amount)
                             .manually_selected_only()
                             .add_utxos(&utxos)
                             .expect("failed to add dust outpoints");
 
-                        // add op_return with data if single P2WPKH input so Tx is 65vb
-                        if dust.len() == 1 && dust[0].txout.script_pubkey.is_p2wpkh() {
+                            for input in &tx.input {
+                                let f_outpoint = input.previous_output;
+                                let f_input_prev_tx = rpc_client
+                                    .get_raw_transaction(&f_outpoint.txid, None)
+                                    .unwrap();
+                                let f_prev_txout =
+                                    f_input_prev_tx.output[f_outpoint.vout as usize].clone();
+
+                                input_amount += f_prev_txout.value;
+
+                                let mut f_psbt_input = Input::default();
+                                // p2tr sighash algorithm commits to all input amounts, thus
+                                // non_witness_utxo is not needed to verify the input value
+                                if f_prev_txout.script_pubkey.is_p2tr() {
+                                    f_psbt_input.witness_utxo = Some(f_prev_txout);
+                                } else {
+                                    f_psbt_input.non_witness_utxo = Some(f_input_prev_tx.clone());
+                                }
+                                f_psbt_input.final_script_witness = Some(input.witness.clone());
+                                tx_builder
+                                    .add_foreign_utxo_with_sequence(
+                                        f_outpoint,
+                                        f_psbt_input,
+                                        input.segwit_weight(),
+                                        input.sequence,
+                                    )
+                                    .unwrap();
+                            }
+                        }
+
+                        tx_builder.fee_absolute(input_amount);
+
+                        // add op_return with data if single input so Tx is 65vb
+                        if existing_tx == None && dust.len() == 1 {
                             let data = PushBytesBuf::try_from("ash".as_bytes().to_vec()).unwrap();
                             tx_builder.add_data(&data);
                         }
-                        // otherwise op_return with no data
+                        // otherwise op_return with no data or same data as found in the existing
+                        // tx
                         else {
-                            let data = PushBytesBuf::from([]);
+                            let data = PushBytesBuf::try_from(output_data).unwrap();
                             tx_builder.add_data(&data);
                         }
 
@@ -145,6 +225,8 @@ fn main() {
 
                         let psbt = tx_builder.finish().expect("failed to create psbt");
                         info!("sign and broadcast tx for psbt: {}", psbt);
+                    } else {
+                        info!("no dust found");
                     }
                 } else {
                     error!("could not load wallet with name {}", wallet_name);
