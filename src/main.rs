@@ -135,8 +135,9 @@ fn main() {
                             .get_raw_mempool()
                             .expect("failed to get mempool transaction IDs");
 
-                        let mut existing_tx: Option<Transaction> = None;
-                        let mut output_data: Vec<u8> = vec![];
+                        let mut existing_txs: Vec<Transaction> = vec![];
+                        let mut suggested_data: Vec<u8> = vec![];
+                        // find txs in the mempool that match ddust pattern
                         for txid in tx_ids {
                             let tx = rpc_client.get_raw_transaction(&txid, None).unwrap();
                             let vouts = &tx.output;
@@ -151,14 +152,15 @@ fn main() {
                                     let is_dust_disposal = script_bytes == [0x6a] // empty
                                         || script_bytes == [&[0x6a, 0x03], ash_bytes].concat(); // "ash"
 
-                                    if is_dust_disposal {
-                                        output_data = match script_bytes {
-                                            [0x6a] => vec![],                       // empty OP_RETURN no data
-                                            [0x6a, _, rest @ ..] => rest.to_vec(),  // skip 0x6a (OP_RETURN) and push byte
+                                    if is_dust_disposal && existing_txs.is_empty() {
+                                        suggested_data = match script_bytes {
+                                            // empty OP_RETURN no data
+                                            [0x6a] => vec![], 
+                                            // skip 0x6a (OP_RETURN) and push byte
+                                            [0x6a, _, rest @ ..] => rest.to_vec(),
                                             _ => vec![],
                                         };
-                                        existing_tx = Some(tx);
-                                        break;
+                                        existing_txs.push(tx);
                                     }
                                 }
                             }
@@ -172,6 +174,8 @@ fn main() {
                             .add_utxos(&utxos)
                             .expect("failed to add dust outpoints");
 
+                        // add inputs of unconfirmed txs
+                        for tx in &existing_txs {
                             for input in &tx.input {
                                 let f_outpoint = input.previous_output;
                                 let f_input_prev_tx = rpc_client
@@ -199,20 +203,20 @@ fn main() {
                                         input.sequence,
                                     )
                                     .unwrap();
-                            }
+                                }
                         }
 
                         tx_builder.fee_absolute(input_amount);
 
                         // add op_return with data if single input so Tx is 65vb
-                        if existing_tx == None && dust.len() == 1 {
+                        if existing_txs.is_empty() && dust.len() == 1 {
                             let data = PushBytesBuf::try_from("ash".as_bytes().to_vec()).unwrap();
                             tx_builder.add_data(&data);
                         }
                         // otherwise op_return with no data or same data as found in the existing
                         // tx
                         else {
-                            let data = PushBytesBuf::try_from(output_data).unwrap();
+                            let data = PushBytesBuf::try_from(suggested_data).unwrap();
                             tx_builder.add_data(&data);
                         }
 
