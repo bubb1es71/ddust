@@ -2,6 +2,7 @@ set quiet := true
 wallet := "test"
 type := "bech32" # valid address types are: legacy, p2sh-segwit, bech32, bech32m
 datadir := "data"
+# NOTE: 'address' and 'balance' recipes require jq (ensure jq is installed)
 chain := "regtest" # valid networks are: main, test, testnet4, signet, regtest
 logdir := if chain == "main" {
           "."
@@ -96,7 +97,7 @@ unload:
 # get wallet address
 [group('rpc')]
 address:
-    bitcoin-cli -datadir={{datadir}} -chain={{chain}} -rpcwallet={{wallet}} getnewaddress "" {{type}}
+    @bitcoin-cli -datadir={{datadir}} -chain={{chain}} -rpcwallet={{wallet}} getnewaddress "" {{type}} | jq -Rs 'rtrimstr("\n")'
 
 # generate n new blocks to given address
 [group('rpc')]
@@ -106,7 +107,7 @@ generate n address:
 # get wallet balance
 [group('rpc')]
 balance:
-    bitcoin-cli -datadir={{datadir}} -chain={{chain}} -rpcwallet={{wallet}} getbalance
+    @bitcoin-cli -datadir={{datadir}} -chain={{chain}} -rpcwallet={{wallet}} getbalance | jq -Rs 'rtrimstr("\n")'
 
 # get wallet transaction details
 [group('rpc')]
@@ -142,6 +143,7 @@ descriptors private:
 [group('rpc')]
 sign psbt:
     bitcoin-cli -datadir={{datadir}} -chain={{chain}} -rpcwallet={{wallet}} walletprocesspsbt '{{psbt}}' true "ALL|ANYONECANPAY"
+
 # run any bitcoin-cli rpc command
 [group('rpc')]
 rpc *command:
