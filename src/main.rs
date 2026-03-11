@@ -15,7 +15,7 @@ use bdk_wallet::bitcoin::psbt::Input;
 use bdk_wallet::bitcoin::psbt::PsbtParseError;
 use bdk_wallet::bitcoin::script::Instruction;
 use bdk_wallet::bitcoin::script::PushBytesBuf;
-use bdk_wallet::chain::{CanonicalizationParams, CheckPoint};
+use bdk_wallet::chain::{BlockId, CanonicalizationParams, CheckPoint};
 use bdk_wallet::{LocalOutput, PersistedWallet, Wallet, miniscript, wallet_name_from_descriptor};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
@@ -412,13 +412,27 @@ fn create_wallet(
         let start_hash = rpc_client
             .get_block_hash(start_height as u64)
             .expect("failed to get start block hash");
-        let start_block = rpc_client
-            .get_block(&start_hash)
-            .expect("failed to get start block");
+
+        let cp = CheckPoint::new(BlockId {
+            height: 0,
+            hash: genesis_hash,
+        })
+        .push(BlockId {
+            height: start_height,
+            hash: start_hash,
+        })
+        .expect("failed to build start checkpoint");
+
         wallet
-            .apply_block_connected_to(&start_block, start_height, (0, genesis_hash).into())
-            .expect("failed to apply start block");
+            .apply_update(bdk_wallet::Update {
+                chain: Some(cp),
+                ..Default::default()
+            })
+            .expect("failed to apply start checkpoint");
     }
+    wallet
+        .persist(&mut wallet_store)
+        .expect("failed to persist start checkpoint");
     (wallet, wallet_store)
 }
 
