@@ -18,6 +18,7 @@ use bdk_wallet::bitcoin::script::PushBytesBuf;
 use bdk_wallet::chain::{CanonicalizationParams, CheckPoint};
 use bdk_wallet::{LocalOutput, PersistedWallet, Wallet, miniscript, wallet_name_from_descriptor};
 use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -78,10 +79,14 @@ fn main() {
                             let address = Address::from_script(&out.txout.script_pubkey, network)
                                 .expect("failed to get address");
                             let value = out.txout.value.display_dynamic();
-                            info!(
-                                "value: {}, address: {}, outpoint: {}:{}",
-                                value, address, out.outpoint.txid, out.outpoint.vout
-                            );
+                            let output = json!({
+                                "wallet": wallet_name,
+                                "value": value.to_string(),
+                                "address": address.to_string(),
+                                "txid": out.outpoint.txid.to_string(),
+                                "vout": out.outpoint.vout
+                            });
+                            println!("{}", serde_json::to_string_pretty(&output).unwrap());
                         }
                     });
                 } else {
@@ -218,7 +223,10 @@ fn main() {
                         }
 
                         let psbt = tx_builder.finish().expect("failed to create psbt");
-                        info!("sign and broadcast tx for psbt: {}", psbt);
+                        let output = json!({
+                            "psbt": psbt.to_string()
+                        });
+                        println!("{}", serde_json::to_string_pretty(&output).unwrap());
                     }
                 } else {
                     error!("could not load wallet with name {}", wallet_name);
@@ -232,7 +240,10 @@ fn main() {
             let txid = rpc_client
                 .send_raw_transaction(&tx)
                 .expect("failed to broadcast transaction");
-            info!("transaction broadcast with txid: {}", txid);
+            let output = json!({
+                "txid": txid.to_string()
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
         }
     }
 }
