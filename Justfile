@@ -41,7 +41,7 @@ test:
 
 # run the project
 run *command: fmt
-    cargo run -- -v -d {{datadir}} -c {{chain}} {{command}}
+    cargo run -- -d {{datadir}} -c {{chain}} {{command}}
 
 # clean the project target directory
 clean:

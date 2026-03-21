@@ -1,7 +1,8 @@
 use bdk_redb::Store;
 use bdk_wallet::bitcoin::secp256k1::{All, Secp256k1};
 use bdk_wallet::bitcoin::{
-    Address, Amount, EcdsaSighashType, Network, Psbt, ScriptBuf, TapSighashType, Transaction, TxIn,
+    Address, Amount, EcdsaSighashType, Network, OutPoint, Psbt, ScriptBuf, TapSighashType,
+    Transaction, TxIn,
 };
 use bdk_wallet::descriptor::ExtendedDescriptor;
 
@@ -16,6 +17,7 @@ use bdk_wallet::bitcoin::psbt::PsbtParseError;
 use bdk_wallet::bitcoin::script::Instruction;
 use bdk_wallet::bitcoin::script::PushBytesBuf;
 use bdk_wallet::chain::{CanonicalizationParams, CheckPoint};
+use bdk_wallet::serde::Serialize;
 use bdk_wallet::{LocalOutput, PersistedWallet, Wallet, miniscript, wallet_name_from_descriptor};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
@@ -34,8 +36,9 @@ fn main() {
     // a builder for `FmtSubscriber`.
     let subscriber = FmtSubscriber::builder()
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
-        // will be written to stdout.
+        // will be written to stderr.
         .with_max_level(log_level)
+        .with_writer(std::io::stderr)
         // completes the builder.
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -46,7 +49,7 @@ fn main() {
     let db_file = args
         .datadir
         .join(format!("ddust-{}.redb", network.to_string().to_lowercase()));
-    info!("db file: {:?}", db_file);
+    debug!("db file: {:?}", db_file);
     let db = Database::create(db_file).expect("failed to open database");
     let db = Arc::new(db);
     let url = default_url(&network);
@@ -67,8 +70,9 @@ fn main() {
             }
         }
         Commands::List => {
+            let mut found_dust = Vec::new();
             for wallet_name in wallet_names(db.clone()) {
-                info!("wallet: {}", wallet_name);
+                debug!("wallet: {}", wallet_name);
                 if let (Some(mut wallet), mut store) =
                     load_wallet(db.clone(), network, wallet_name.clone())
                 {
@@ -76,18 +80,21 @@ fn main() {
                     wallet.list_unspent().for_each(|out| {
                         if is_dust(&out, &dust_amount) {
                             let address = Address::from_script(&out.txout.script_pubkey, network)
-                                .expect("failed to get address");
-                            let value = out.txout.value.display_dynamic();
-                            info!(
-                                "value: {}, address: {}, outpoint: {}:{}",
-                                value, address, out.outpoint.txid, out.outpoint.vout
-                            );
+                                .expect("failed to get address")
+                                .to_string();
+                            let value = out.txout.value.to_sat() as u32;
+                            found_dust.push(Dust {
+                                address,
+                                value,
+                                outpoint: out.outpoint,
+                            });
                         }
                     });
                 } else {
                     error!("could not load wallet with name {}", wallet_name);
                 }
             }
+            println!("{}", serde_json::to_string_pretty(&found_dust).unwrap());
         }
         Commands::Spend { address } => {
             let filter_address = Address::from_str(&address)
@@ -95,7 +102,7 @@ fn main() {
                 .require_network(network)
                 .expect("invalid network");
             for wallet_name in wallet_names(db.clone()) {
-                info!("wallet: {}", wallet_name);
+                debug!("wallet: {}", wallet_name);
                 if let (Some(mut wallet), mut store) =
                     load_wallet(db.clone(), network, wallet_name.clone())
                 {
@@ -118,7 +125,7 @@ fn main() {
                         let mut input_amount: Amount = dust.iter().map(|out| out.txout.value).sum();
                         let utxos = dust.iter().map(|out| out.outpoint).collect::<Vec<_>>();
                         let unconfirmed_txs = find_unconfirmed_ddust_txs(&rpc_client);
-                        info!("found {} unconfirmed ddust txs", unconfirmed_txs.len());
+                        debug!("found {} unconfirmed ddust txs", unconfirmed_txs.len());
 
                         let mut tx_builder = wallet.build_tx();
 
@@ -137,7 +144,7 @@ fn main() {
                                 &unconfirmed_txs[0].output[0].script_pubkey,
                             )
                         {
-                            info!("unconfirmed trs can be combined");
+                            debug!("unconfirmed trs can be combined");
                             // add inputs of unconfirmed txs
                             for tx in &unconfirmed_txs {
                                 for input in &tx.input {
@@ -183,7 +190,7 @@ fn main() {
                                 }
                             }
                         }
-                        info!("total spent to fees: {}", &input_amount);
+                        debug!("total spent to fees: {}", &input_amount);
                         tx_builder.fee_absolute(input_amount);
 
                         if !unconfirmed_txs.is_empty() {
@@ -218,7 +225,7 @@ fn main() {
                         }
 
                         let psbt = tx_builder.finish().expect("failed to create psbt");
-                        info!("sign and broadcast tx for psbt: {}", psbt);
+                        println!("{}", psbt);
                     }
                 } else {
                     error!("could not load wallet with name {}", wallet_name);
@@ -232,7 +239,7 @@ fn main() {
             let txid = rpc_client
                 .send_raw_transaction(&tx)
                 .expect("failed to broadcast transaction");
-            info!("transaction broadcast with txid: {}", txid);
+            println!("{}", txid);
         }
     }
 }
@@ -271,18 +278,25 @@ enum Commands {
         #[arg(short, long, default_value_t = 0)]
         start_height: u32,
     },
-    /// List all dust UTXOs in your wallet descriptor(s)
+    /// List all dust UTXOs in your wallet descriptor(s), returns json array
     List,
-    /// Create a PSBT to spend dust UTXOs for an address to an OP_RETURN, the entire amount will go to fees
+    /// Spend dust UTXOs to an OP_RETURN, the entire amount goes to fees, returns PSBT
     Spend {
         /// Bitcoin address of dust to be spent
         address: String,
     },
-    /// Broadcast a PSBT after it's been signed
+    /// Broadcast a PSBT after it's been signed, returns txid
     Broadcast {
         #[arg(value_parser = parse_psbt)]
         psbt: Psbt,
     },
+}
+
+#[derive(Serialize)]
+struct Dust {
+    pub address: String,
+    pub value: u32,
+    pub outpoint: OutPoint,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -424,17 +438,17 @@ fn create_wallet(
 
 fn sync_wallet(rpc_client: &Client, wallet: &mut PersistedWallet<Store>, store: &mut Store) {
     let blockchain_info = rpc_client.get_blockchain_info().unwrap();
-    info!(
+    debug!(
         "connected to bitcoin core rpc, chain: {}",
         blockchain_info.chain
     );
-    info!(
+    debug!(
         "latest block: {} at height {}",
         blockchain_info.best_block_hash, blockchain_info.blocks,
     );
 
     let wallet_tip: CheckPoint = wallet.latest_checkpoint();
-    info!(
+    debug!(
         "current wallet tip is: {} at height {}",
         &wallet_tip.hash(),
         &wallet_tip.height()
@@ -457,7 +471,7 @@ fn sync_wallet(rpc_client: &Client, wallet: &mut PersistedWallet<Store>, store: 
         expected_mempool_tx,
     );
 
-    info!("syncing blocks...");
+    debug!("syncing blocks...");
     while let Some(block) = emitter.next_block().unwrap() {
         wallet
             .apply_block_connected_to(&block.block, block.block_height(), block.connected_to())
@@ -479,7 +493,7 @@ fn sync_wallet(rpc_client: &Client, wallet: &mut PersistedWallet<Store>, store: 
         }
     }
 
-    info!("syncing mempool...");
+    debug!("syncing mempool...");
     let mempool_emissions: Vec<(Arc<Transaction>, u64)> = emitter.mempool().unwrap().update;
     wallet.apply_unconfirmed_txs(mempool_emissions);
     wallet.persist(store).expect("unable to persist wallet");
