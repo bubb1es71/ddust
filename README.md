@@ -69,6 +69,31 @@ If the check passes, ddust builds a single replacement transaction that:
 
 This RBF-based approach consolidates multiple pending dust disposals into one confirmed transaction, saving around 23 bytes of blockchain space per input, reducing on-chain footprint and ensuring the replacement fee rate is sufficient for acceptance by the network.
 
+## Testing
+
+The test suite requires a bitcoind binary to run integration tests against a regtest network.
+
+### Setting up bitcoind
+
+Before running tests, set the `BITCOIND_EXE` environment variable to point to your `bitcoind` binary:
+```bash
+export BITCOIND_EXE=/path/to/bitcoind
+```
+
+If you don't have `bitcoind` installed, download it from [bitcoincore.org](https://bitcoincore.org/en/download/):
+```bash
+# Example for Linux
+wget https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-x86_64-linux-gnu.tar.gz
+tar xzf bitcoin-30.2-x86_64-linux-gnu.tar.gz
+export BITCOIND_EXE=$PWD/bitcoin-30.2/bin/bitcoind
+```
+
+### Running tests
+
+```bash
+just test
+```
+
 ## Requirements
 
 - rust 1.92+
