@@ -20,33 +20,33 @@ This BIP specifies a standardized protocol for safely disposing of dust UTXOs by
 
 ### The Dust Attack Problem
 
-Dust attacks are a well-documented privacy threat where attackers send small amounts of bitcoin to numerous addresses. When wallet software later consolidates these dust UTXOs with non-dust UTXOs the attacker can analyze the blockchain to link previously unassociated addresses, potentially deanonymizing users.
+Dust attacks are a well-documented privacy threat where attackers send small amounts of bitcoin to numerous addresses. When wallet software later consolidates these dust UTXOs with non-dust UTXOs, the attacker can analyze the blockchain to link previously unassociated addresses, potentially deanonymizing users.
 
 The common solution to this issue is to "lock" dust UTXOs and never spend them, but this creates its own problems:
 
-1. **UTXO Set Bloat**: Unspent dust permanently occupies space in the UTXO set that all full nodes must maintain
-2. **Wallet Clutter**: Accumulated dust degrades wallet usability and complicates coin selection
-3. **Accidental Consolidation**: Users may inadvertently spend dust during legitimate transactions, achieving the attacker's goal
-4. **Lock Fragility**: Wallet software that "locks" dust UTXOs to prevent spending provides only temporary protection; wallet migrations, restores from seed phrases, software bugs, or inheritance scenarios can inadvertently unlock dust, exposing users to the original attack
+1. **UTXO Set Bloat**: Unspent dust permanently occupies space in the UTXO set that all full nodes must maintain.
+2. **Wallet Clutter**: Accumulated dust degrades wallet usability and complicates coin selection.
+3. **Accidental Consolidation**: Users may inadvertently spend dust during legitimate transactions, achieving the attacker's goal.
+4. **Lock Fragility**: Wallet software that "locks" dust UTXOs to prevent spending provides only temporary protection; wallet migrations, restores from seed phrases, software bugs, or inheritance scenarios can inadvertently unlock dust, exposing users to the original attack.
 
 ### Why OP_RETURN Disposal
 
 Spending dust to an OP_RETURN output with the entire value going to fees provides several benefits:
 
-1. **No New UTXOs**: OP_RETURN outputs are provably unspendable and not stored in the UTXO set
-2. **No Address Linking**: Without a change output, there is no new address to link
-3. **Permanent Removal**: The dust UTXOs are removed from the user's wallet entirely
-4. **Miner Compensation**: OP_RETURN outputs are small, providing higher transaction fee rates
-5. **No Cost to Victims**: Dust attack UTXO values are used to pay for their own disposal
+1. **No New UTXOs**: OP_RETURN outputs are provably unspendable and not stored in the UTXO set.
+2. **No Address Linking**: Without a change output, there is no new address to link.
+3. **Permanent Removal**: The dust UTXOs are removed from the user's wallet entirely.
+4. **Miner Compensation**: OP_RETURN outputs are small, providing higher transaction fee rates.
+5. **No Cost to Victims**: Dust attack UTXO values are used to pay for their own disposal.
 
 ### Why Standardization
 
 A standardized protocol enables:
 
-1. **Wallet Anonymity**: Transactions with a standard format cannot be used to fingerprint the wallet software a user is running
-2. **Third-Party Batching**: Multiple dust disposals can be combined into single transactions, reducing overall block space consumption
-3. **Best Practice Codification**: Ensures implementations follow privacy-preserving best practices
-4. **Easy Identification**: Chain analysis tools can use disposal transactions to help trace the sources of dust attacks
+1. **Wallet Anonymity**: Transactions with a standard format cannot be used to fingerprint the wallet software a user is running.
+2. **Third-Party Batching**: Multiple dust disposals can be combined into single transactions, reducing overall block space consumption.
+3. **Best Practice Codification**: Ensures implementations follow privacy-preserving best practices.
+4. **Easy Identification**: Chain analysis tools can use disposal transactions to help trace the sources of dust attacks.
 
 ## Specification
 
@@ -56,72 +56,72 @@ A compliant dust disposal transaction MUST satisfy all the following requirement
 
 #### Overall
 
-1. The transaction MUST signal RBF replaceability (nSequence < 0xFFFFFFFE)
-2. The ntimelock MUST be set to block height 0
-3. The fee rate MUST be at least 0.1 sat/vB
+1. The transaction MUST signal RBF replaceability (nSequence < 0xFFFFFFFE).
+2. The ntimelock MUST be set to block height 0.
+3. The fee rate MUST be at least 0.1 sat/vB.
 
 #### Outputs
 
-1. The transaction MUST have exactly one output
-2. The single output MUST be an OP_RETURN output
+1. The transaction MUST have exactly one output.
+2. The single output MUST be an OP_RETURN.
 3. The OP_RETURN data MUST be either:
    - Empty: `0x6a 0x00` (OP_RETURN OP_0), or
-   - The ASCII string "ash": `0x6a 0x03 0x61 0x73 0x68` (OP_RETURN OP_PUSHBYTES_3 "ash")
+   - The ASCII string "ash": `0x6a 0x03 0x61 0x73 0x68` (OP_RETURN OP_PUSHBYTES_3 "ash").
 
-The "ash" marker MUST be used when padding is needed to meet the 65 vB minimum standard transaction size with a single witness input. Implementations SHOULD prefer empty OP_RETURN data when the transaction already meets minimum size requirements.
+The "ash" marker MUST be used when padding is needed to meet the 65 vB minimum standard transaction size with a single witness input. Implementations MUST prefer empty OP_RETURN data when the transaction already meets minimum size requirements.
 
 #### Inputs
 
-1. All inputs MUST use the signature hash type `SIGHASH_ALL | SIGHASH_ANYONECANPAY` (0x81)
+1. All inputs MUST use the signature hash type `SIGHASH_ALL | SIGHASH_ANYONECANPAY` (0x81).
 2. For Taproot (P2TR) inputs using key-path spending, implementations MUST explicitly append the signature hash type byte `SIGHASH_ALL | SIGHASH_ANYONECANPAY` (0x81) to enable ANYONECANPAY semantics, as the default sighash for Taproot (SIGHASH_DEFAULT, which omits the byte) does not include ANYONECANPAY.
-3. All inputs must be confirmed in the blockchain at least one block deep
+3. All inputs must be confirmed in the blockchain at least one block deep.
 
 #### Fees
 
-1. The entire input value MUST go to fees (output value is zero for OP_RETURN)
-2. The transaction fee rate MUST be at least 0.1 sat/vB to meet minimum relay requirements (Bitcoin Core 30.0+)
-3. The transaction fee rate MAY be higher based on the available dust UTXO amounts and transaction size
+1. The entire input value MUST go to fees (output value is zero for OP_RETURN).
+2. The transaction fee rate MUST be at least 0.1 sat/vB to meet minimum relay requirements (Bitcoin Core 30.0+).
+3. The transaction fee rate MAY be higher based on the available dust UTXO amounts and transaction size.
 
 ### Transaction Size
 
-1. The transaction size MUST be at least 65 virtual bytes to meet Bitcoin Core's minimum relay size
-2. If the transaction would otherwise be smaller than 65 vB, the "ash" OP_RETURN marker MUST be used to add the necessary bytes
+1. The transaction base size MUST be at least 65 bytes to meet Bitcoin Core's minimum relay size standardness rule.
+2. If the transaction would otherwise be smaller than 65 bytes, the OP_RETURN value "ash" as ASCII (UTF-8) bytes (0x61, 0x73, 0x68) MUST be used to pad the transaction's size to 65 bytes.
 
 ### Address Consolidation Rules
 
-To preserve user privacy, implementations:
+Implementations consolidating dust UTXOs for a single user (i.e., not third-party batching services):
 
-- MUST NOT consolidate dust UTXOs that were sent to different addresses
-- SHOULD consolidate dust UTXOs for dust sent to the same address
-- MUST NOT broadcast dust disposal transactions at the same time for dust sent to different addresses
+- MUST NOT spend dust UTXOs that were sent to different addresses in the same transaction.
+- MUST NOT broadcast dust disposal transactions at the same time for dust sent to different addresses.
+- SHOULD spend dust UTXOs for dust sent to the same address in one transaction.
 
 ### Batching Dust Disposal Transactions via RBF
 
-Multiple unconfirmed dust disposal transactions created by unrelated entities MAY be batched into a single replacement transaction using Replace-By-Fee (RBF). This is enabled by the SIGHASH_ANYONECANPAY signature type.
+Multiple unconfirmed dust disposal transactions created by unrelated entities MAY be batched into a single replacement transaction using Replace-By-Fee (RBF). This is enabled by the inputs SIGHASH_ANYONECANPAY signature type.
 
 In addition to standard RBF rules, batch dust disposal transactions must follow all transaction construction requirements for non-batched dust disposal transactions.
 
 #### Third-Party Batching
 
-A third-party service batching dust disposal transactions could compromise their user's privacy by collecting related network and timing metadata. The best practice for these services is:
+A third-party batching service for dust disposal transactions could compromise their users' privacy by collecting user-related network and timing metadata. The best practice for these services is:
 
-1. The service MUST NOT collect pre-signed inputs directly from wallet users
-2. The service SHOULD collect pre-signed inputs from the public bitcoin network mempool
-3. The service MAY add their own UTXO inputs to improve the batch transaction's fee rate as long as all the requirements of this specification are still followed
+1. The service MUST NOT collect pre-signed inputs directly from wallet users.
+2. The service SHOULD collect pre-signed inputs from the public bitcoin network mempool.
+3. The service MAY add their own UTXO inputs to improve the batch transaction's fee rate as long as all the requirements of this specification are still followed.
 
 This mempool-based approach preserves user privacy while enabling efficient batching:
 
-- Users broadcast their individual dust disposal transactions to the network
-- Batching services monitor the mempool for compliant dust disposal transactions
-- Services can combine unconfirmed transactions via RBF without knowing user identities
+1. Users broadcast their individual dust disposal transactions to the network.
+2. Batching services monitor the mempool for compliant dust disposal transactions.
+3. Services can combine unconfirmed transactions via RBF without knowing user identities.
 
 ### Dust Threshold
 
 Implementations SHOULD allow users to configure their own dust threshold based on:
 
-1. Current and anticipated fee rates
-2. Input script type (different types have different spending costs)
-3. Varying amounts that may be used by dust attack initiators
+1. The current and anticipated fee rates.
+2. The dust input script type, different types have different spending costs.
+3. The varying amounts that may be used by dust attack initiators.
 
 A UTXO is generally considered dust if its value is less than the cost to spend it at a reasonable fee rate, but any small UTXO value could be used in a dust attack.
 
@@ -129,12 +129,12 @@ A UTXO is generally considered dust if its value is less than the cost to spend 
 
 #### Transaction Signing
 
-1. **Key Security**: Signing dust disposal transactions requires signing with the wallet's private keys. This could be a risk for cold storage wallets where the key or keys needed to sign are not easily accessible.
+1. **Key Security**: Signing dust disposal transactions requires signing with the user's wallet private keys. This could be a risk for cold storage wallets where the key or keys needed to sign are not easily accessible.
 2. **Transaction Correctness**: Transaction signers must carefully review and verify that only dust UTXOs are spent and no other inputs are signed.
 
 #### Privacy Preservation
 
-1. **Network surveillance**: Internet service providers and other internet monitors may be able to determine the nodes that initially broadcast a dust disposal transaction, Tor or other privacy preserving overlay networks should be used.
+1. **Network surveillance**: Internet service providers and other internet monitors may be able to determine the nodes that initially broadcast a dust disposal transaction. If available the `sendrawtransaction -privatebroadcast` RPC feature should be used (available in [Bitcoin Core 31.0](https://github.com/bitcoin-core/bitcoin-devwiki/wiki/31.0-Release-Notes-Draft#p2p-and-network-changes)).
 2. **Timing Analysis**: Users should be aware that the timing of dust disposal transactions is publicly observable. Dust disposal transactions should not be broadcast at the same time or on a predictable schedule.
 3. **Amount Analysis**: The specific dust amounts selected for dust disposal if outside the norm may be used to fingerprint the wallet creating the disposal transactions.
 
@@ -151,13 +151,13 @@ A UTXO is generally considered dust if its value is less than the cost to spend 
 
 Consolidating dust from multiple addresses for the same wallet creates the same privacy harm that dust attacks attempt to achieve. By requiring wallet software to create separate transactions per address (by default), the protocol ensures dust disposal doesn't harm privacy.
 
-### Why 65 vB Minimum?
+### Why 65 Byte Minimum?
 
-Bitcoin Core enforces a minimum transaction size of 65 virtual bytes as a policy rule to prevent certain attack vectors. Compliant transactions must meet this threshold to be relayed by standard nodes.
+Bitcoin Core enforces a minimum transaction base size of 65 bytes as a policy rule to prevent certain attack vectors. Compliant transactions must meet this threshold to be relayed by standard nodes.
 
 ### Why 0.1 sat/vB Minimum Fee Rate?
 
-Bitcoin Core 30.0 reduced the minimum relay fee rate to 0.1 sat/vB (1 sat/kvB). This allows dust UTXOs to be disposed of economically even when their value is very small. Implementations targeting earlier node versions may need higher minimum fee rates.
+[Bitcoin Core 30.0](https://bitcoincore.org/en/releases/30.0/) reduced the minimum relay fee rate to 0.1 sat/vB (1 sat/kvB). This allows dust UTXOs to be disposed of economically even when their value is very small. Implementations targeting earlier node versions may need higher minimum fee rates.
 
 ### Why SIGHASH_ALL|ANYONECANPAY?
 
@@ -167,18 +167,19 @@ The ANYONECANPAY flag allows additional inputs to be added to the dust disposal 
 2. **User privacy**: Transactions shared via the public mempool do not reveal user identity metadata.
 3. **Fee Bumping**: Additional inputs can be added by unrelated third parties to increase the fee rate.
 
-### Why nlocktime block height 0
+### Why nLockTime block height 0
 
-1. **User privacy**: Using the same nlocktime for all dust disposal transactions obscures when it was created.
+1. **User privacy**: Using the same nLockTime for all dust disposal transactions obscures when it was created.
 2. **Fee sniping**: The value of disposal transactions should be small enough that fee sniping is not a concern.
 
 ## Backwards Compatibility
 
 This BIP introduces no changes to the Bitcoin consensus rules or peer-to-peer protocol. All transactions conforming to this specification are valid under existing consensus rules and can be relayed by nodes supporting:
 
-- OP_RETURN outputs (standard since Bitcoin Core 0.9.0)
+- OP_RETURN outputs (Bitcoin Core 0.9.0+)
 - SIGHASH_ANYONECANPAY (original Bitcoin feature)
 - 0.1 sat/vB minimum relay fee (Bitcoin Core 30.0+)
+- Private transaction broadcast (Bitcoin Core 31.0+)
 
 Nodes running Bitcoin Core versions prior to 30.0 do not relay transactions with fee rates below 1 sat/vB which could slow the relaying of disposal transactions with lower fee rates.
 
@@ -204,7 +205,7 @@ The test cases below can be used to verify a wallet disposes of dust UTXOs accor
 
 ### Spending dust
 
-All valid dust disposal transactions should be verified to be accepted into the bitcoind (version 30+) mempool.
+All valid dust disposal transactions should be verified to be accepted into the bitcoind (Bitcoin Core 30.0+) mempool.
 
 1. Spending a single witness (Bech32m/P2TR) dust UTXO must produce a dust disposal transaction with a single "ash" OP_RETURN output.
 2. Spending multiple dust UTXOs always produces a single empty OP_RETURN output regardless of script type.
