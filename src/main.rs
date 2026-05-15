@@ -657,28 +657,54 @@ fn is_ddust_tx(tx: &Transaction) -> bool {
     // All inputs must be ALL|ANYONECANPAY
     for input in &tx.input {
         if !input.witness.is_empty() {
-            // If a segwit input check the witness sighash byte
-            let sig = input.witness.nth(0).unwrap();
-            match sig.len() {
-                // Taproot with explicit sighash
-                65 => {
-                    if sig[64] != TapSighashType::AllPlusAnyoneCanPay as u8 {
-                        return false;
+            let witness_length = input.witness.len();
+
+            match witness_length {
+                // Taproot key-path: single witness item (signature only)
+                1 => {
+                    let sig = input.witness.nth(0).unwrap();
+                    match sig.len() {
+                        65 => {
+                            if sig[64] != TapSighashType::AllPlusAnyoneCanPay as u8 {
+                                return false;
+                            }
+                        }
+                        _ => return false,
                     }
                 }
-                // ECDSA (P2WPKH/P2WSH) — low-R/low-S sigs (with sighash byte) are typically
-                // 71 B, but can be 70 when s has a leading 0x00, or 72 in non-grinded paths.
-                70..=73 => {
-                    if *sig.last().unwrap() != EcdsaSighashType::AllPlusAnyoneCanPay as u8 {
-                        return false;
+                // P2WPKH: <signature> <pubkey>
+                2 => {
+                    let sig = input.witness.nth(0).unwrap();
+                    match sig.len() {
+                        70..=73 => {
+                            if *sig.last().unwrap() != EcdsaSighashType::AllPlusAnyoneCanPay as u8 {
+                                return false;
+                            }
+                        }
+                        _ => return false,
                     }
                 }
-                // Taproot default sighash (64 bytes) or unknown
-                _ => return false,
+                // P2WSH multisig: <OP_0> <sig1> ... <sigN> <witness script>
+                _ => {
+                    for (i, item) in input.witness.iter().enumerate() {
+                        if i == 0 || i == witness_length - 1 {
+                            continue;
+                        }
+                        if item.is_empty() {
+                            continue;
+                        }
+                        if item.len() < 70 || item.len() > 73 {
+                            return false;
+                        }
+                        if *item.last().unwrap() != EcdsaSighashType::AllPlusAnyoneCanPay as u8 {
+                            return false;
+                        }
+                    }
+                }
             }
         }
-        // If a legacy, input check the script sig sighash byte
-        else if input.script_sig.is_p2pkh() || input.script_sig.is_p2sh() {
+        // legacy and P2SH-wrapped segwit inputs: check sighash byte from scriptSig
+        else if !input.script_sig.is_empty() {
             for instruction in input.script_sig.instructions() {
                 if let Ok(Instruction::PushBytes(data)) = instruction
                     && let Ok(sig) = Signature::from_slice(data.as_bytes())
@@ -687,6 +713,8 @@ fn is_ddust_tx(tx: &Transaction) -> bool {
                     return false;
                 }
             }
+        } else {
+            return false;
         }
     }
     true
@@ -886,6 +914,7 @@ mod tests {
         network: Network,
         wallet1_name: String,
         wallet2_name: String,
+        wallet3_name: String,
     }
 
     impl TestContext {
@@ -907,6 +936,8 @@ mod tests {
             env.create_wallet(&wallet1_name);
             let wallet2_name = "wallet_2".to_string();
             env.create_wallet(&wallet2_name);
+            let wallet3_name = "wallet_3".to_string();
+            env.create_wallet(&wallet3_name);
             Self {
                 env,
                 db,
@@ -915,6 +946,7 @@ mod tests {
                 network,
                 wallet1_name,
                 wallet2_name,
+                wallet3_name,
             }
         }
     }
@@ -1244,6 +1276,74 @@ mod tests {
         let psbt = result.unwrap();
 
         // 2-of-2: both wallets must sign
+        let partially_signed = ctx.env.wallet_process_psbt(&ctx.wallet1_name, &psbt);
+        let fully_signed = ctx
+            .env
+            .wallet_process_psbt(&ctx.wallet2_name, &partially_signed);
+        broadcast_and_assert(&ctx, fully_signed, 1);
+    }
+
+    /// Spend a 2-of-2 P2wSH multisig dust UTXO
+    #[test]
+    fn test_spend_p2wsh_2of2_multisig() {
+        let ctx = TestContext::new();
+
+        let (addr, desc) = ctx.env.create_multisig(
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
+            2,
+            &AddressType::Bech32,
+        );
+
+        cmd_add(&ctx.secp, &ctx.db, ctx.network, &ctx.rpc_client, desc, 0);
+        ctx.env.send_to_address(&addr, Amount::from_sat(555));
+        ctx.env.mine_blocks(1);
+
+        let result = cmd_spend(
+            &ctx.db,
+            ctx.network,
+            &ctx.rpc_client,
+            Amount::from_sat(600),
+            addr,
+            false,
+        );
+        assert!(result.is_some(), "expected a psbt to be created");
+        let psbt = result.unwrap();
+
+        // 2-of-2: both wallets must sign
+        let partially_signed = ctx.env.wallet_process_psbt(&ctx.wallet1_name, &psbt);
+        let fully_signed = ctx
+            .env
+            .wallet_process_psbt(&ctx.wallet2_name, &partially_signed);
+        broadcast_and_assert(&ctx, fully_signed, 1);
+    }
+
+    /// Spend a 2-of-3 P2wSH multisig dust UTXO
+    #[test]
+    fn test_spend_p2wsh_2of3_multisig() {
+        let ctx = TestContext::new();
+
+        let (addr, desc) = ctx.env.create_multisig(
+            &[&ctx.wallet1_name, &ctx.wallet2_name, &ctx.wallet3_name],
+            2,
+            &AddressType::Bech32,
+        );
+
+        cmd_add(&ctx.secp, &ctx.db, ctx.network, &ctx.rpc_client, desc, 0);
+        ctx.env.send_to_address(&addr, Amount::from_sat(555));
+        ctx.env.mine_blocks(1);
+
+        let result = cmd_spend(
+            &ctx.db,
+            ctx.network,
+            &ctx.rpc_client,
+            Amount::from_sat(600),
+            addr,
+            false,
+        );
+        assert!(result.is_some(), "expected a psbt to be created");
+        let psbt = result.unwrap();
+
+        // 2-of-3: any 2 of the 3 wallets must sign
         let partially_signed = ctx.env.wallet_process_psbt(&ctx.wallet1_name, &psbt);
         let fully_signed = ctx
             .env
