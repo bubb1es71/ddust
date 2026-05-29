@@ -12,11 +12,12 @@ use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client, RpcApi};
 use bdk_redb::redb::{Database, TableHandle};
 use bdk_wallet::KeychainKind::Internal;
 use bdk_wallet::bitcoin::absolute::LockTime;
-use bdk_wallet::bitcoin::ecdsa::Signature;
+use bdk_wallet::bitcoin::ecdsa::Signature as EcdsaSignature;
 use bdk_wallet::bitcoin::psbt::Input;
 use bdk_wallet::bitcoin::psbt::PsbtParseError;
 use bdk_wallet::bitcoin::script::Instruction;
 use bdk_wallet::bitcoin::script::PushBytesBuf;
+use bdk_wallet::bitcoin::taproot::Signature as TaprootSignature;
 use bdk_wallet::chain::{CanonicalizationParams, CheckPoint};
 use bdk_wallet::serde::Serialize;
 use bdk_wallet::{
@@ -657,57 +658,61 @@ fn is_ddust_tx(tx: &Transaction) -> bool {
     // All inputs must be ALL|ANYONECANPAY
     for input in &tx.input {
         if !input.witness.is_empty() {
+            // Uses witness length as heuristic to infer script type from witness length.
+            // TODO: For a more robust approach, fetch previous outputs via RPC and check script_pubkey (is_p2tr, is_p2wpkh, etc.)
             let witness_length = input.witness.len();
-
             match witness_length {
                 // Taproot key-path: single witness item (signature only)
                 1 => {
-                    let sig = input.witness.nth(0).unwrap();
-                    match sig.len() {
-                        65 => {
-                            if sig[64] != TapSighashType::AllPlusAnyoneCanPay as u8 {
-                                return false;
-                            }
-                        }
-                        _ => return false,
+                    let sig_bytes = input.witness.nth(0).unwrap();
+                    // Use rust-bitcoin's taproot::Signature parser which handles both
+                    // 64-byte (SIGHASH_DEFAULT) and 65-byte (explicit sighash) formats
+                    // and validates per BIP-341 (rejects 65-byte sigs with sighash 0x00)
+                    if !TaprootSignature::from_slice(sig_bytes)
+                        .is_ok_and(|sig| sig.sighash_type == TapSighashType::AllPlusAnyoneCanPay)
+                    {
+                        return false;
                     }
                 }
                 // P2WPKH: <signature> <pubkey>
                 2 => {
-                    let sig = input.witness.nth(0).unwrap();
-                    match sig.len() {
-                        70..=73 => {
-                            if *sig.last().unwrap() != EcdsaSighashType::AllPlusAnyoneCanPay as u8 {
-                                return false;
-                            }
-                        }
-                        _ => return false,
+                    let sig_bytes = input.witness.nth(0).unwrap();
+                    // Use rust-bitcoin's ecdsa::Signature parser which validates
+                    // DER encoding and extracts the sighash byte automatically
+                    if !EcdsaSignature::from_slice(sig_bytes)
+                        .is_ok_and(|sig| sig.sighash_type == EcdsaSighashType::AllPlusAnyoneCanPay)
+                    {
+                        return false;
                     }
                 }
                 // P2WSH multisig: <OP_0> <sig1> ... <sigN> <witness script>
+                // We assume witness_length >= 3 is P2WSH multisig.
+                // TODO: Handle taproot script-path spends which have witness_length >= 2 and a control block as the last element.
                 _ => {
                     for (i, item) in input.witness.iter().enumerate() {
+                        // Skip OP_0 dummy element (index 0) and witness script (last element)
                         if i == 0 || i == witness_length - 1 {
                             continue;
                         }
+                        // Skip empty items (for m-of-n multisig where m < n)
                         if item.is_empty() {
                             continue;
                         }
-                        if item.len() < 70 || item.len() > 73 {
-                            return false;
-                        }
-                        if *item.last().unwrap() != EcdsaSighashType::AllPlusAnyoneCanPay as u8 {
+                        // Use rust-bitcoin's ecdsa::Signature parser
+                        if !EcdsaSignature::from_slice(item).is_ok_and(|sig| {
+                            sig.sighash_type == EcdsaSighashType::AllPlusAnyoneCanPay
+                        }) {
                             return false;
                         }
                     }
                 }
             }
         }
-        // legacy and P2SH-wrapped segwit inputs: check sighash byte from scriptSig
+        // Legacy (P2PKH, P2SH) inputs: check sighash byte from scriptSig
         else if !input.script_sig.is_empty() {
             for instruction in input.script_sig.instructions() {
                 if let Ok(Instruction::PushBytes(data)) = instruction
-                    && let Ok(sig) = Signature::from_slice(data.as_bytes())
+                    && let Ok(sig) = EcdsaSignature::from_slice(data.as_bytes())
                     && sig.sighash_type != EcdsaSighashType::AllPlusAnyoneCanPay
                 {
                     return false;
