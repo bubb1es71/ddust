@@ -956,6 +956,42 @@ mod tests {
         }
     }
 
+    /// Helper for multisig spend tests
+    /// Creates a multisig address, funds it, spends the dust, and signs with `signers`
+    /// `wallets` = all wallets in the multisig, `signers` = wallets that sign (subset of wallets)
+    fn run_spend_test_multisig(
+        ctx: &TestContext,
+        addr_type: &AddressType,
+        dust_sats: u64,
+        required: usize,
+        wallets: &[&str],
+        signers: &[&str],
+    ) {
+        const DUST_THRESHOLD_BUFFER: u64 = 50;
+        let (addr, desc) = ctx.env.create_multisig(wallets, required, addr_type);
+
+        cmd_add(&ctx.secp, &ctx.db, ctx.network, &ctx.rpc_client, desc, 0);
+        ctx.env.send_to_address(&addr, Amount::from_sat(dust_sats));
+        ctx.env.mine_blocks(1);
+
+        let result = cmd_spend(
+            &ctx.db,
+            ctx.network,
+            &ctx.rpc_client,
+            Amount::from_sat(dust_sats + DUST_THRESHOLD_BUFFER),
+            addr,
+            false,
+        );
+
+        let psbt = result.expect("expected a psbt to be created");
+
+        let mut signed_psbt = psbt;
+        for signer in signers {
+            signed_psbt = ctx.env.wallet_process_psbt(signer, &signed_psbt);
+        }
+        broadcast_and_assert(ctx, signed_psbt, 1);
+    }
+
     /// Add descriptors for multiple address types, send dust and non-dust UTXOs,
     /// verify cmd_list only returns UTXOs at or below the dust threshold.
     #[test]
@@ -1139,9 +1175,7 @@ mod tests {
             addr,
             false,
         );
-        assert!(result.is_some(), "expected a psbt to be created");
-
-        let psbt = result.unwrap();
+        let psbt = result.expect("expected a psbt to be created");
         let signed = ctx.env.wallet_process_psbt(&ctx.wallet1_name, &psbt);
         broadcast_and_assert(&ctx, signed, utxo_count);
     }
@@ -1258,68 +1292,28 @@ mod tests {
     #[test]
     fn test_spend_multisig() {
         let ctx = TestContext::new();
-
-        let (addr, desc) = ctx.env.create_multisig(
-            &[&ctx.wallet1_name, &ctx.wallet2_name],
-            2,
+        run_spend_test_multisig(
+            &ctx,
             &AddressType::Legacy,
+            555,
+            2,
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
         );
-
-        cmd_add(&ctx.secp, &ctx.db, ctx.network, &ctx.rpc_client, desc, 0);
-        ctx.env.send_to_address(&addr, Amount::from_sat(555));
-        ctx.env.mine_blocks(1);
-
-        let result = cmd_spend(
-            &ctx.db,
-            ctx.network,
-            &ctx.rpc_client,
-            Amount::from_sat(600),
-            addr,
-            false,
-        );
-        assert!(result.is_some(), "expected a psbt to be created");
-        let psbt = result.unwrap();
-
-        // 2-of-2: both wallets must sign
-        let partially_signed = ctx.env.wallet_process_psbt(&ctx.wallet1_name, &psbt);
-        let fully_signed = ctx
-            .env
-            .wallet_process_psbt(&ctx.wallet2_name, &partially_signed);
-        broadcast_and_assert(&ctx, fully_signed, 1);
     }
 
     /// Spend a 2-of-2 P2wSH multisig dust UTXO
     #[test]
     fn test_spend_p2wsh_2of2_multisig() {
         let ctx = TestContext::new();
-
-        let (addr, desc) = ctx.env.create_multisig(
-            &[&ctx.wallet1_name, &ctx.wallet2_name],
-            2,
+        run_spend_test_multisig(
+            &ctx,
             &AddressType::Bech32,
+            555,
+            2,
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
         );
-
-        cmd_add(&ctx.secp, &ctx.db, ctx.network, &ctx.rpc_client, desc, 0);
-        ctx.env.send_to_address(&addr, Amount::from_sat(555));
-        ctx.env.mine_blocks(1);
-
-        let result = cmd_spend(
-            &ctx.db,
-            ctx.network,
-            &ctx.rpc_client,
-            Amount::from_sat(600),
-            addr,
-            false,
-        );
-        assert!(result.is_some(), "expected a psbt to be created");
-        let psbt = result.unwrap();
-
-        // 2-of-2: both wallets must sign
-        let partially_signed = ctx.env.wallet_process_psbt(&ctx.wallet1_name, &psbt);
-        let fully_signed = ctx
-            .env
-            .wallet_process_psbt(&ctx.wallet2_name, &partially_signed);
-        broadcast_and_assert(&ctx, fully_signed, 1);
     }
 
     /// Spend a 2-of-3 P2wSH multisig dust UTXO
@@ -1327,33 +1321,58 @@ mod tests {
     fn test_spend_p2wsh_2of3_multisig() {
         let ctx = TestContext::new();
 
-        let (addr, desc) = ctx.env.create_multisig(
-            &[&ctx.wallet1_name, &ctx.wallet2_name, &ctx.wallet3_name],
-            2,
+        run_spend_test_multisig(
+            &ctx,
             &AddressType::Bech32,
+            555,
+            2,
+            &[&ctx.wallet1_name, &ctx.wallet2_name, &ctx.wallet3_name],
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
         );
+    }
 
-        cmd_add(&ctx.secp, &ctx.db, ctx.network, &ctx.rpc_client, desc, 0);
-        ctx.env.send_to_address(&addr, Amount::from_sat(555));
-        ctx.env.mine_blocks(1);
-
-        let result = cmd_spend(
-            &ctx.db,
-            ctx.network,
-            &ctx.rpc_client,
-            Amount::from_sat(600),
-            addr,
-            false,
+    /// Spend a 2-of-2 P2SH-P2wSH multisig dust UTXO
+    #[test]
+    fn test_spend_p2sh_p2wsh_2of2_multisig() {
+        let ctx = TestContext::new();
+        run_spend_test_multisig(
+            &ctx,
+            &AddressType::P2shSegwit,
+            555,
+            2,
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
         );
-        assert!(result.is_some(), "expected a psbt to be created");
-        let psbt = result.unwrap();
+    }
 
-        // 2-of-3: any 2 of the 3 wallets must sign
-        let partially_signed = ctx.env.wallet_process_psbt(&ctx.wallet1_name, &psbt);
-        let fully_signed = ctx
-            .env
-            .wallet_process_psbt(&ctx.wallet2_name, &partially_signed);
-        broadcast_and_assert(&ctx, fully_signed, 1);
+    /// Spend a 2-of-3 P2SH-P2wSH multisig dust UTXO
+    #[test]
+    fn test_spend_p2sh_p2wsh_2of3_multisig() {
+        let ctx = TestContext::new();
+
+        run_spend_test_multisig(
+            &ctx,
+            &AddressType::P2shSegwit,
+            555,
+            2,
+            &[&ctx.wallet1_name, &ctx.wallet2_name, &ctx.wallet3_name],
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
+        );
+    }
+
+    /// Spend a 2-of-3 P2SH multisig dust UTXO
+    #[test]
+    fn test_spend_p2sh_2of3_multisig() {
+        let ctx = TestContext::new();
+
+        run_spend_test_multisig(
+            &ctx,
+            &AddressType::Legacy,
+            555,
+            2,
+            &[&ctx.wallet1_name, &ctx.wallet2_name, &ctx.wallet3_name],
+            &[&ctx.wallet1_name, &ctx.wallet2_name],
+        );
     }
 
     /// Minimum sats the batcher's dust must be worth for the replacement to satisfy RBF.
