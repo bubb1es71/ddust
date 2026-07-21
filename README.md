@@ -110,7 +110,7 @@ just test
 
 ## Requirements
 
-- rust 1.92+
+- rust 1.97.1+
 - a local tor proxy daemon
 - a local bitcoin core node
   - version 31+
