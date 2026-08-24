@@ -116,5 +116,6 @@ just test
   - version 31+
   - RPC enabled (e.g. "-rpcallowip=0.0.0.0/0 -rpcbind=0.0.0.0")
   - privatebroadcast enabled (e.g. "-privatebroadcast")
+  - txindex enabled (txindex=1)
   - TOR proxy enabled (e.g. "-proxy=127.0.0.1:9050")
   - cookie file authentication

@@ -12,13 +12,11 @@ use bdk_bitcoind_rpc::bitcoincore_rpc::{Auth, Client, RpcApi};
 use bdk_redb::redb::{Database, TableHandle};
 use bdk_wallet::KeychainKind::Internal;
 use bdk_wallet::bitcoin::absolute::LockTime;
-use bdk_wallet::bitcoin::ecdsa::Signature as EcdsaSignature;
 use bdk_wallet::bitcoin::psbt::Input;
 use bdk_wallet::bitcoin::psbt::PsbtParseError;
-use bdk_wallet::bitcoin::script::Instruction;
 use bdk_wallet::bitcoin::script::PushBytesBuf;
-use bdk_wallet::bitcoin::taproot::Signature as TaprootSignature;
 use bdk_wallet::chain::{CanonicalizationParams, CheckPoint};
+use bdk_wallet::miniscript::interpreter::{Interpreter, KeySigPair, SatisfiedConstraint};
 use bdk_wallet::serde::Serialize;
 use bdk_wallet::{
     KeychainKind, LocalOutput, PersistedWallet, Wallet, miniscript, wallet_name_from_descriptor,
@@ -579,7 +577,7 @@ fn find_unconfirmed_ddust_txs(rpc_client: &Client) -> Vec<Transaction> {
     // find txs in the mempool that match ddust pattern
     for txid in tx_ids {
         let tx = rpc_client.get_raw_transaction(&txid, None).unwrap();
-        if is_ddust_tx(&tx) {
+        if is_ddust_tx(&tx, rpc_client) {
             unconfirmed_txs.push(tx);
         }
     }
@@ -638,7 +636,7 @@ fn add_foreign_utxos(
 /// has exactly one output which must be an OP_RETURN
 /// one or more inputs with ALL|ANYONECANPAY signature type
 /// op_return contains the string "ash"
-fn is_ddust_tx(tx: &Transaction) -> bool {
+fn is_ddust_tx(tx: &Transaction, rpc_client: &Client) -> bool {
     // Must have exactly one output
     if tx.output.len() != 1 {
         return false;
@@ -655,74 +653,84 @@ fn is_ddust_tx(tx: &Transaction) -> bool {
         return false;
     }
 
-    // All inputs must be ALL|ANYONECANPAY
-    for input in &tx.input {
-        if !input.witness.is_empty() {
-            // Uses witness length as heuristic to infer script type from witness length.
-            // TODO: For a more robust approach, fetch previous outputs via RPC and check script_pubkey (is_p2tr, is_p2wpkh, etc.)
-            let witness_length = input.witness.len();
-            match witness_length {
-                // Taproot key-path: single witness item (signature only)
-                1 => {
-                    let sig_bytes = input.witness.nth(0).unwrap();
-                    // Use rust-bitcoin's taproot::Signature parser which handles both
-                    // 64-byte (SIGHASH_DEFAULT) and 65-byte (explicit sighash) formats
-                    // and validates per BIP-341 (rejects 65-byte sigs with sighash 0x00)
-                    if !TaprootSignature::from_slice(sig_bytes)
-                        .is_ok_and(|sig| sig.sighash_type == TapSighashType::AllPlusAnyoneCanPay)
-                    {
-                        return false;
-                    }
-                }
-                // P2WPKH: <signature> <pubkey>
-                2 => {
-                    let sig_bytes = input.witness.nth(0).unwrap();
-                    // Use rust-bitcoin's ecdsa::Signature parser which validates
-                    // DER encoding and extracts the sighash byte automatically
-                    if !EcdsaSignature::from_slice(sig_bytes)
-                        .is_ok_and(|sig| sig.sighash_type == EcdsaSighashType::AllPlusAnyoneCanPay)
-                    {
-                        return false;
-                    }
-                }
-                // P2WSH multisig: <OP_0> <sig1> ... <sigN> <witness script>
-                // We assume witness_length >= 3 is P2WSH multisig.
-                // TODO: Handle taproot script-path spends which have witness_length >= 2 and a control block as the last element.
-                _ => {
-                    for (i, item) in input.witness.iter().enumerate() {
-                        // Skip OP_0 dummy element (index 0) and witness script (last element)
-                        if i == 0 || i == witness_length - 1 {
-                            continue;
-                        }
-                        // Skip empty items (for m-of-n multisig where m < n)
-                        if item.is_empty() {
-                            continue;
-                        }
-                        // Use rust-bitcoin's ecdsa::Signature parser
-                        if !EcdsaSignature::from_slice(item).is_ok_and(|sig| {
-                            sig.sighash_type == EcdsaSighashType::AllPlusAnyoneCanPay
-                        }) {
-                            return false;
-                        }
-                    }
-                }
+    // All inputs must be ALL|ANYONECANPAY. Witness and scriptSig stacks are
+    // untyped: an element's meaning (signature, pubkey, preimage, script) is
+    // defined by the prevout script being spent, so classification requires
+    // fetching the prevout script_pubkey via RPC.
+    tx.input.iter().all(|input| {
+        let prevout_spk = rpc_client
+            .get_raw_transaction(&input.previous_output.txid, None)
+            .ok()
+            .and_then(|prev_tx| {
+                prev_tx
+                    .output
+                    .get(input.previous_output.vout as usize)
+                    .map(|txout| txout.script_pubkey.clone())
+            });
+        match prevout_spk {
+            Some(spk) => is_all_anyonecanpay_input(input, &spk, tx.lock_time),
+            // Prevout unavailable (e.g. no txindex): cannot classify, skip tx.
+            None => {
+                debug!(
+                    "cannot fetch prevout {} for sighash check",
+                    input.previous_output
+                );
+                false
             }
         }
-        // Legacy (P2PKH, P2SH) inputs: check sighash byte from scriptSig
-        else if !input.script_sig.is_empty() {
-            for instruction in input.script_sig.instructions() {
-                if let Ok(Instruction::PushBytes(data)) = instruction
-                    && let Ok(sig) = EcdsaSignature::from_slice(data.as_bytes())
-                    && sig.sighash_type != EcdsaSighashType::AllPlusAnyoneCanPay
-                {
+    })
+}
+
+/// Returns true if every signature in the input uses sighash ALL|ANYONECANPAY.
+/// Uses the miniscript interpreter to assign each stack element its
+/// script-defined role, so only actual signature elements are checked. Handles
+/// legacy P2PK/P2PKH, P2SH (including wrapped segwit), P2WPKH, P2WSH, and
+/// taproot key-path and script-path spends. Inputs that cannot be interpreted
+/// (non-miniscript scripts, malformed elements, unsatisfied timelocks) or that
+/// contain no signatures at all are rejected.
+fn is_all_anyonecanpay_input(input: &TxIn, prevout_spk: &ScriptBuf, lock_time: LockTime) -> bool {
+    let interpreter = match Interpreter::from_txdata(
+        prevout_spk,
+        &input.script_sig,
+        &input.witness,
+        input.sequence,
+        lock_time,
+    ) {
+        Ok(interpreter) => interpreter,
+        Err(e) => {
+            debug!("cannot interpret input: {}", e);
+            return false;
+        }
+    };
+
+    // Signature validity is not checked, only the sighash type of each signature.
+    let mut has_signature = false;
+    for constraint in interpreter.iter_assume_sigs() {
+        match constraint {
+            Ok(SatisfiedConstraint::PublicKey { key_sig })
+            | Ok(SatisfiedConstraint::PublicKeyHash { key_sig, .. }) => {
+                has_signature = true;
+                let is_all_acp = match key_sig {
+                    KeySigPair::Ecdsa(_, sig) => {
+                        sig.sighash_type == EcdsaSighashType::AllPlusAnyoneCanPay
+                    }
+                    KeySigPair::Schnorr(_, sig) => {
+                        sig.sighash_type == TapSighashType::AllPlusAnyoneCanPay
+                    }
+                };
+                if !is_all_acp {
                     return false;
                 }
             }
-        } else {
-            return false;
+            // Hashlocks and timelocks carry no signature
+            Ok(_) => {}
+            Err(e) => {
+                debug!("cannot interpret input stack: {}", e);
+                return false;
+            }
         }
     }
-    true
+    has_signature
 }
 
 fn get_input_vsize(input: &TxIn) -> f64 {
@@ -902,6 +910,9 @@ mod test_calc;
 
 #[cfg(test)]
 mod test_env;
+
+#[cfg(test)]
+mod test_sighash;
 
 #[cfg(test)]
 mod tests {
@@ -1144,7 +1155,7 @@ mod tests {
             .unwrap()
             .transaction()
             .unwrap();
-        assert!(is_ddust_tx(&tx));
+        assert!(is_ddust_tx(&tx, &ctx.rpc_client));
         assert_eq!(tx.input.len(), expected_inputs);
         assert_eq!(tx.output.len(), 1);
         assert_eq!(tx.output[0].script_pubkey, op_return_ash);

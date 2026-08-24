@@ -18,6 +18,7 @@ Key dependencies: `bdk_wallet` 3, `bdk_bitcoind_rpc` (sync via Bitcoin Core RPC)
   - mempool batching / RBF — `find_unconfirmed_ddust_txs`, `is_ddust_tx`, `add_foreign_utxos`, `find_batchable_txs`, `CandidateTx`
   - `mod tests` (bottom of file) — unit and integration tests
 - `src/test_calc.rs` — fee/vsize calculation tests (included via `#[cfg(test)] mod` in `main.rs`)
+- `src/test_sighash.rs` — input sighash classification unit tests (included via `#[cfg(test)] mod` in `main.rs`)
 - `src/test_env.rs` — regtest test environment (`TestEnv`, spawns bitcoind via `corepc-node`)
 - `Justfile` — task runner: build/test recipes plus regtest node and wallet RPC helpers
 - `data/` — local runtime state (gitignored)
@@ -62,7 +63,7 @@ Download instructions are in the README "Testing" section. CI uses Bitcoin Core 
 
 ## Behavioral invariants — do not break these
 
-- A ddust transaction is identified by exactly one OP_RETURN output and all inputs signed with sighash `ALL|ANYONECANPAY` (`is_ddust_tx`). Sighash parsing must handle both ECDSA (legacy/P2SH/P2WSH) and taproot key-path inputs
+- A ddust transaction is identified by exactly one OP_RETURN output and all inputs signed with sighash `ALL|ANYONECANPAY` (`is_ddust_tx`). Sighash detection uses the miniscript interpreter (`miniscript::interpreter::Interpreter::from_txdata` + `iter_assume_sigs`) with the prevout script_pubkey fetched via RPC, so every standard input type is covered: legacy P2PK/P2PKH, P2SH (incl. wrapped segwit), P2WPKH, P2WSH, and taproot key-path and script-path spends. Inputs that cannot be interpreted are rejected
 - `list` and `spend` skip dust UTXOs at any address that also holds an unspent non-dust UTXO (public-key exposure / quantum-risk guard); `--unsafe` overrides this
 - Default dust threshold is 546 sats (`--amount`); default chain is regtest (`--chain`)
 - Mempool batching must satisfy RBF replacement rules: the combined fee rate must exceed the highest replaced ddust tx fee rate by at least 0.1 sat/vB, and the OP_RETURN data of the first replaced tx must be preserved
